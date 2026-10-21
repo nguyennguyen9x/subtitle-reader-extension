@@ -84,13 +84,12 @@ function injectToggleButton() {
 		isEnabled = !isEnabled;
 		chrome.storage.sync.set({ enabled: isEnabled });
 		updateToggleButtonUI(toggleBtn, isEnabled);
+		applyVolumeState();
 
 		if (isEnabled) {
-			showToastNotification("🟢 Đã bật Sherpa TTS - Đang khôi phục...");
-			handleExtensionTurnOn();
+			showToastNotification("🟢 Đã bật Sherpa TTS");
 		} else {
-			fullResetArrays();
-			showToastNotification("🛑 Đã tắt Sherpa TTS");
+			showToastNotification("🛑 Đã tắt Sherpa TTS (vẫn đọc ngầm, chỉ tắt âm lượng)");
 		}
 	});
 
@@ -159,23 +158,8 @@ function attachVideoListeners() {
 	}
 }
 
-function handleExtensionTurnOn() {
-	const btn = document.getElementById("sherpa-tts-toggle-btn");
-	if (btn) updateToggleButtonUI(btn, true);
-
-	if (lastLoadedRawCues && lastLoadedRawCues.cues.length > 0) {
-		subtitleCues = lastLoadedRawCues.cues;
-		currentSubtitleLang = lastLoadedRawCues.lang;
-
-		const video = document.querySelector("video");
-		const now = video ? video.currentTime : 0;
-		currentCueIndex = subtitleCues.findIndex((c) => c.start >= now);
-		if (currentCueIndex === -1) currentCueIndex = subtitleCues.length;
-
-		showToastNotification(`🚀 Khôi phục thành công ${subtitleCues.length} câu phụ đề! Tiếp tục đọc...`);
-	} else {
-		window.postMessage({ type: "FORCE_TRIGGER_SUBTITLES" }, "*");
-	}
+function applyVolumeState() {
+	if (currentAudio) currentAudio.volume = isEnabled ? 1 : 0;
 }
 
 function checkAndInitYouTube() {
@@ -188,7 +172,7 @@ function checkAndInitYouTube() {
 		const btn = document.getElementById("sherpa-tts-toggle-btn");
 		if (btn) updateToggleButtonUI(btn, isEnabled);
 
-		if (isEnabled && subtitleCues.length === 0) {
+		if (subtitleCues.length === 0) {
 			window.postMessage({ type: "FORCE_TRIGGER_SUBTITLES" }, "*");
 		}
 	});
@@ -213,13 +197,9 @@ chrome.storage.onChanged.addListener((changes) => {
 		isEnabled = changes.enabled.newValue;
 		const btn = document.getElementById("sherpa-tts-toggle-btn");
 		if (btn) updateToggleButtonUI(btn, isEnabled);
+		applyVolumeState();
 
-		if (!isEnabled) {
-			fullResetArrays();
-			showToastNotification("🛑 Đã tắt Sherpa TTS");
-		} else {
-			handleExtensionTurnOn();
-		}
+		showToastNotification(isEnabled ? "🟢 Đã bật Sherpa TTS" : "🛑 Đã tắt Sherpa TTS (vẫn đọc ngầm, chỉ tắt âm lượng)");
 	}
 });
 
@@ -242,7 +222,6 @@ function getFixedSpeed(lang) {
 }
 
 function preloadAllCues(cues, lang) {
-	if (!isEnabled) return;
 	showToastNotification(`🚀 Đã nạp thành công ${cues.length} câu phụ đề! Đang sinh sẵn âm thanh...`);
 
 	cues.forEach((cue, index) => {
@@ -252,7 +231,7 @@ function preloadAllCues(cues, lang) {
 
 		if (!preloadedAudioCache.has(cacheKey)) {
 			setTimeout(() => {
-				if (!isEnabled || subtitleCues.length === 0) return;
+				if (subtitleCues.length === 0) return;
 
 				fetch("http://127.0.0.1:5000/synthesize", {
 					method: "POST",
@@ -274,7 +253,7 @@ window.addEventListener("message", (event) => {
 	if (event.data.type === "SHERPA_SUBTITLES_LOADED") {
 		lastLoadedRawCues = { cues: event.data.cues, lang: event.data.lang || "vi" };
 
-		if (!isEnabled || subtitleCues.length > 0) return;
+		if (subtitleCues.length > 0) return;
 
 		subtitleCues = event.data.cues;
 		currentSubtitleLang = event.data.lang || "vi";
@@ -289,7 +268,6 @@ window.addEventListener("message", (event) => {
 });
 
 function enqueueToPlay(text, speed, cueStartTime) {
-	if (!isEnabled) return;
 	const clean = text.replace(/\s+/g, " ").trim();
 	if (!clean) return;
 
@@ -310,7 +288,7 @@ function enqueueToPlay(text, speed, cueStartTime) {
 			return blob;
 		})
 		.then((resolvedBlob) => {
-			if (resolvedBlob && isEnabled) {
+			if (resolvedBlob) {
 				audioQueue.push({ text: clean, speed, cueStartTime, blob: resolvedBlob });
 				if (audioQueue.length > 3) audioQueue.shift();
 				playNext();
@@ -319,13 +297,13 @@ function enqueueToPlay(text, speed, cueStartTime) {
 }
 
 async function playNext() {
-	if (isPlaying || audioQueue.length === 0 || !isEnabled) return;
+	if (isPlaying || audioQueue.length === 0) return;
 
 	isPlaying = true;
 	const item = audioQueue.shift();
 	const blob = item.blob;
 
-	if (!blob || !isEnabled) {
+	if (!blob) {
 		isPlaying = false;
 		playNext();
 		return;
@@ -334,6 +312,7 @@ async function playNext() {
 	const url = URL.createObjectURL(blob);
 	currentAudio = new Audio(url);
 	currentAudio.playbackRate = item.speed;
+	currentAudio.volume = isEnabled ? 1 : 0;
 
 	currentAudio.onended = () => {
 		URL.revokeObjectURL(url);
@@ -354,7 +333,6 @@ async function playNext() {
 }
 
 setInterval(() => {
-	if (!isEnabled) return;
 	injectToggleButton();
 	attachVideoListeners();
 
@@ -377,7 +355,13 @@ setInterval(() => {
 	}
 
 	const video = document.querySelector("video");
-	if (!video || video.paused) return;
+	if (!video) return;
+
+	if (video.paused) {
+		if (currentAudio && !currentAudio.paused) currentAudio.pause();
+		return;
+	}
+	if (currentAudio && currentAudio.paused && isPlaying) currentAudio.play().catch(() => {});
 
 	const now = video.currentTime;
 
