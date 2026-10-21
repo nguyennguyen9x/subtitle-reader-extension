@@ -16,8 +16,8 @@ let currentAudio = null;
 let lastVideoTime = 0;
 let currentVideoUrl = location.href;
 let currentSubtitleLang = "vi";
+let lastLoadedRawCues = null;
 
-// Hàm hiển thị thông báo góc trên bên phải màn hình YouTube
 function showToastNotification(message, duration = 3000) {
 	let toast = document.getElementById("sherpa-toast-notification");
 	if (!toast) {
@@ -51,13 +51,72 @@ function showToastNotification(message, duration = 3000) {
 	}, duration);
 }
 
+function injectToggleButton() {
+	if (document.getElementById("sherpa-tts-toggle-btn")) return;
+
+	const subtitleBtn = document.querySelector(".ytp-subtitles-button");
+	const rightControls = document.querySelector(".ytp-right-controls");
+
+	if (!rightControls) return;
+
+	const toggleBtn = document.createElement("button");
+	toggleBtn.id = "sherpa-tts-toggle-btn";
+	toggleBtn.className = "ytp-button";
+	toggleBtn.style.cssText = `
+    width: auto !important;
+    padding: 0 8px !important;
+    font-size: 11px;
+    font-weight: bold;
+    font-family: Roboto, Arial, sans-serif;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: #fff;
+    vertical-align: top;
+  `;
+
+	updateToggleButtonUI(toggleBtn, isEnabled);
+
+	toggleBtn.addEventListener("click", () => {
+		isEnabled = !isEnabled;
+		chrome.storage.sync.set({ enabled: isEnabled });
+		updateToggleButtonUI(toggleBtn, isEnabled);
+
+		if (isEnabled) {
+			showToastNotification("🟢 Đã bật Sherpa TTS - Đang khôi phục...");
+			handleExtensionTurnOn();
+		} else {
+			fullResetArrays();
+			showToastNotification("🛑 Đã tắt Sherpa TTS");
+		}
+	});
+
+	if (subtitleBtn && subtitleBtn.parentNode) {
+		subtitleBtn.parentNode.insertBefore(toggleBtn, subtitleBtn);
+	} else {
+		rightControls.insertBefore(toggleBtn, rightControls.firstChild);
+	}
+}
+
+function updateToggleButtonUI(btn, state) {
+	if (state) {
+		btn.innerHTML = `<span style="background: #cc0000; color: white; padding: 3px 6px; border-radius: 3px; font-weight: 600;">TTS: ON</span>`;
+		btn.title = "Tắt Sherpa TTS";
+	} else {
+		btn.innerHTML = `<span style="background: #444; color: #aaa; padding: 3px 6px; border-radius: 3px; font-weight: 600;">TTS: OFF</span>`;
+		btn.title = "Bật Sherpa TTS";
+	}
+}
+
 function fullResetArrays() {
 	subtitleCues = [];
 	currentCueIndex = 0;
 	audioQueue = [];
 	isPlaying = false;
 	lastVideoTime = 0;
-	preloadedAudioCache.clear();
 
 	if (currentAudio) {
 		currentAudio.pause();
@@ -66,15 +125,70 @@ function fullResetArrays() {
 	}
 }
 
-// Kiểm tra trạng thái On/Off liên tục và tự động kích hoạt khi ở YouTube
+// Xử lý khi người dùng tua video (Seek)
+function handleVideoSeek() {
+	const video = document.querySelector("video");
+	if (!video || subtitleCues.length === 0) return;
+
+	const now = video.currentTime;
+
+	// Dừng ngay lập tức âm thanh đang phát
+	if (currentAudio) {
+		currentAudio.pause();
+		currentAudio.src = "";
+		currentAudio = null;
+	}
+
+	// Xóa sạch toàn bộ hàng đợi phát dở dang
+	audioQueue = [];
+	isPlaying = false;
+
+	// Tìm lại chính xác vị trí câu phụ đề phù hợp với mốc thời gian vừa tua tới
+	currentCueIndex = subtitleCues.findIndex((c) => c.start >= now);
+	if (currentCueIndex === -1) currentCueIndex = subtitleCues.length;
+
+	showToastNotification("⏩ Đã tua video - Đồng bộ lại âm thanh");
+}
+
+// Gắn sự kiện lắng nghe thao tác tua của thẻ <video>
+function attachVideoListeners() {
+	const video = document.querySelector("video");
+	if (video && !video._hasSeekListener) {
+		video._hasSeekListener = true;
+		video.addEventListener("seeking", handleVideoSeek);
+	}
+}
+
+function handleExtensionTurnOn() {
+	const btn = document.getElementById("sherpa-tts-toggle-btn");
+	if (btn) updateToggleButtonUI(btn, true);
+
+	if (lastLoadedRawCues && lastLoadedRawCues.cues.length > 0) {
+		subtitleCues = lastLoadedRawCues.cues;
+		currentSubtitleLang = lastLoadedRawCues.lang;
+
+		const video = document.querySelector("video");
+		const now = video ? video.currentTime : 0;
+		currentCueIndex = subtitleCues.findIndex((c) => c.start >= now);
+		if (currentCueIndex === -1) currentCueIndex = subtitleCues.length;
+
+		showToastNotification(`🚀 Khôi phục thành công ${subtitleCues.length} câu phụ đề! Tiếp tục đọc...`);
+	} else {
+		window.postMessage({ type: "FORCE_TRIGGER_SUBTITLES" }, "*");
+	}
+}
+
 function checkAndInitYouTube() {
 	if (!location.hostname.includes("youtube.com")) return;
+	injectToggleButton();
+	attachVideoListeners();
 
 	chrome.storage.sync.get(["enabled"], (data) => {
 		if (data.enabled !== undefined) isEnabled = data.enabled;
+		const btn = document.getElementById("sherpa-tts-toggle-btn");
+		if (btn) updateToggleButtonUI(btn, isEnabled);
 
 		if (isEnabled && subtitleCues.length === 0) {
-			// Ép gửi tín hiệu để injected.js chủ động gọi hoặc trích xuất phụ đề ngay lập tức
 			window.postMessage({ type: "FORCE_TRIGGER_SUBTITLES" }, "*");
 		}
 	});
@@ -82,6 +196,7 @@ function checkAndInitYouTube() {
 
 window.addEventListener("yt-navigate-finish", () => {
 	currentVideoUrl = location.href;
+	lastLoadedRawCues = null;
 	fullResetArrays();
 	setTimeout(checkAndInitYouTube, 1000);
 });
@@ -90,20 +205,20 @@ window.addEventListener("beforeunload", () => fullResetArrays());
 
 chrome.storage.sync.get(["enabled"], (data) => {
 	if (data.enabled !== undefined) isEnabled = data.enabled;
-	if (isEnabled) {
-		setTimeout(checkAndInitYouTube, 1000);
-	}
+	setTimeout(checkAndInitYouTube, 1000);
 });
 
 chrome.storage.onChanged.addListener((changes) => {
 	if (changes.enabled) {
 		isEnabled = changes.enabled.newValue;
+		const btn = document.getElementById("sherpa-tts-toggle-btn");
+		if (btn) updateToggleButtonUI(btn, isEnabled);
+
 		if (!isEnabled) {
 			fullResetArrays();
 			showToastNotification("🛑 Đã tắt Sherpa TTS");
 		} else {
-			showToastNotification("🟢 Đã bật Sherpa TTS - Đang nạp phụ đề...");
-			checkAndInitYouTube();
+			handleExtensionTurnOn();
 		}
 	}
 });
@@ -111,6 +226,7 @@ chrome.storage.onChanged.addListener((changes) => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 	if (request.action === "RESET_ARRAYS") {
 		fullResetArrays();
+		lastLoadedRawCues = null;
 		showToastNotification("🔄 Đã reset bộ đệm Sherpa TTS");
 		checkAndInitYouTube();
 		sendResponse({ status: "ok" });
@@ -127,7 +243,7 @@ function getFixedSpeed(lang) {
 
 function preloadAllCues(cues, lang) {
 	if (!isEnabled) return;
-	showToastNotification(`🚀 Đang bắt đầu nạp và sinh sẵn ${cues.length} câu phụ đề...`);
+	showToastNotification(`🚀 Đã nạp thành công ${cues.length} câu phụ đề! Đang sinh sẵn âm thanh...`);
 
 	cues.forEach((cue, index) => {
 		const cleanText = cue.text.replace(/\s+/g, " ").trim();
@@ -155,9 +271,10 @@ function preloadAllCues(cues, lang) {
 
 window.addEventListener("message", (event) => {
 	if (event.source !== window || !event.data) return;
-	if (event.data.type === "SHERPA_SUBTITLES_LOADED" && isEnabled) {
-		// Nếu đã nạp rồi thì bỏ qua để tránh trùng lặp
-		if (subtitleCues.length > 0) return;
+	if (event.data.type === "SHERPA_SUBTITLES_LOADED") {
+		lastLoadedRawCues = { cues: event.data.cues, lang: event.data.lang || "vi" };
+
+		if (!isEnabled || subtitleCues.length > 0) return;
 
 		subtitleCues = event.data.cues;
 		currentSubtitleLang = event.data.lang || "vi";
@@ -234,20 +351,26 @@ async function playNext() {
 	});
 }
 
-// Vòng lặp kiểm tra thời gian thực để phát âm thanh
 setInterval(() => {
 	if (!isEnabled) return;
+	injectToggleButton();
+	attachVideoListeners();
 
 	if (location.href !== currentVideoUrl) {
 		currentVideoUrl = location.href;
+		lastLoadedRawCues = null;
 		fullResetArrays();
 		setTimeout(checkAndInitYouTube, 1000);
 		return;
 	}
 
 	if (subtitleCues.length === 0) {
-		// Nếu chưa có mảng phụ đề, định kỳ kích hoạt lại việc tìm kiếm
-		if (Math.random() < 0.2) checkAndInitYouTube();
+		if (lastLoadedRawCues) {
+			subtitleCues = lastLoadedRawCues.cues;
+			currentSubtitleLang = lastLoadedRawCues.lang;
+		} else if (Math.random() < 0.2) {
+			checkAndInitYouTube();
+		}
 		return;
 	}
 
@@ -256,15 +379,9 @@ setInterval(() => {
 
 	const now = video.currentTime;
 
+	// Dự phòng: Nếu phát hiện chênh lệch thời gian quá lớn đột ngột (do tua nhanh)
 	if (Math.abs(now - lastVideoTime) > 2.5) {
-		audioQueue = [];
-		isPlaying = false;
-		if (currentAudio) {
-			currentAudio.pause();
-			currentAudio = null;
-		}
-		currentCueIndex = subtitleCues.findIndex((c) => c.start >= now);
-		if (currentCueIndex === -1) currentCueIndex = subtitleCues.length;
+		handleVideoSeek();
 	}
 	lastVideoTime = now;
 
