@@ -1,4 +1,3 @@
-// 1. Nhúng injected.js vào trang để bắt gói tin phụ đề gốc
 const script = document.createElement("script");
 script.src = chrome.runtime.getURL("injected.js");
 script.onload = function () {
@@ -7,15 +6,34 @@ script.onload = function () {
 (document.head || document.documentElement).appendChild(script);
 
 let isEnabled = true;
-let subtitleCues = []; // Danh sách toàn bộ phụ đề kèm mốc thời gian (giây)
+let subtitleCues = [];
 let currentCueIndex = 0;
-let preloadedCache = new Map(); // Lưu sẵn các file âm thanh đã tải trước
+let preloadedCache = new Map();
 
 let audioQueue = [];
 let isPlaying = false;
 let currentAudio = null;
+let lastVideoTime = 0;
+let currentVideoUrl = location.href;
 
-// Lấy cấu hình bật/tắt
+function fullResetArrays() {
+	subtitleCues = [];
+	currentCueIndex = 0;
+	audioQueue = [];
+	isPlaying = false;
+	lastVideoTime = 0;
+	preloadedCache.clear();
+
+	if (currentAudio) {
+		currentAudio.pause();
+		currentAudio.src = "";
+		currentAudio = null;
+	}
+}
+
+window.addEventListener("yt-navigate-start", () => fullResetArrays());
+window.addEventListener("beforeunload", () => fullResetArrays());
+
 chrome.storage.sync.get(["enabled"], (data) => {
 	if (data.enabled !== undefined) isEnabled = data.enabled;
 });
@@ -23,69 +41,71 @@ chrome.storage.sync.get(["enabled"], (data) => {
 chrome.storage.onChanged.addListener((changes) => {
 	if (changes.enabled) {
 		isEnabled = changes.enabled.newValue;
-		if (!isEnabled) resetAudioState();
+		if (!isEnabled) fullResetArrays();
 	}
 });
 
-function resetAudioState() {
-	audioQueue = [];
-	isPlaying = false;
-	if (currentAudio) {
-		currentAudio.pause();
-		currentAudio = null;
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+	if (request.action === "RESET_ARRAYS") {
+		fullResetArrays();
+		sendResponse({ status: "ok" });
 	}
-}
+});
 
-// 2. Nhận danh sách phụ đề chuẩn 100% từ injected.js
 window.addEventListener("message", (event) => {
 	if (event.source !== window || !event.data) return;
 	if (event.data.type === "SHERPA_SUBTITLES_LOADED") {
+		fullResetArrays();
 		subtitleCues = event.data.cues;
-		preloadedCache.clear();
-		resetAudioState();
 
 		const video = document.querySelector("video");
 		const now = video ? video.currentTime : 0;
-		// Tìm vị trí phụ đề khớp với thời gian hiện tại của video
 		currentCueIndex = subtitleCues.findIndex((c) => c.start >= now);
 		if (currentCueIndex === -1) currentCueIndex = subtitleCues.length;
-
-		console.log(`✅ [Sherpa TTS] Đã nạp đầy đủ ${subtitleCues.length} câu phụ đề (Không bao giờ miss)!`);
 	}
 });
 
-// Hàm gọi Python Server tạo âm thanh trước (Pre-fetch)
-function fetchAudioBlob(text) {
-	if (preloadedCache.has(text)) return preloadedCache.get(text);
+// Tính toán tốc độ cố định mượt mà (chậm hơn 20%, hệ số 0.8)
+function calculateSmoothSpeed(text, availableDuration) {
+	const video = document.querySelector("video");
+	const videoRate = video ? video.playbackRate : 1.0;
+
+	const wordCount = text.trim().split(/\s+/).length;
+	const estimatedNaturalTime = wordCount / 3.4;
+	const realAllowedTime = (availableDuration || 3.0) / videoRate;
+
+	let targetSpeed = (estimatedNaturalTime / realAllowedTime) * 0.8;
+	targetSpeed = Math.max(0.85 * videoRate, Math.min(1.25, targetSpeed));
+	return Number(targetSpeed.toFixed(2));
+}
+
+function fetchAudioBlob(text, speed) {
+	const cacheKey = `${text}_${speed}`;
+	if (preloadedCache.has(cacheKey)) return preloadedCache.get(cacheKey);
 
 	const promise = fetch("http://127.0.0.1:5000/synthesize", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ text: text }),
+		body: JSON.stringify({ text: text, speed: speed }),
 	})
 		.then((res) => (res.ok ? res.blob() : null))
-		.catch((err) => {
-			console.error("❌ Lỗi gọi Server:", err);
-			return null;
-		});
+		.catch(() => null);
 
-	preloadedCache.set(text, promise);
-	// Giới hạn cache để không tốn RAM
-	if (preloadedCache.size > 30) {
+	preloadedCache.set(cacheKey, promise);
+	if (preloadedCache.size > 25) {
 		const firstKey = preloadedCache.keys().next().value;
 		preloadedCache.delete(firstKey);
 	}
 	return promise;
 }
 
-function enqueueToPlay(text) {
+function enqueueToPlay(text, speed, cueStartTime) {
 	const clean = text.replace(/\s+/g, " ").trim();
 	if (!clean) return;
 
-	const blobPromise = fetchAudioBlob(clean);
-	audioQueue.push({ text: clean, blobPromise });
+	const blobPromise = fetchAudioBlob(clean, speed);
+	audioQueue.push({ text: clean, speed, cueStartTime, blobPromise });
 
-	// Nếu hàng đợi bị dồn quá 3 câu, bỏ qua câu cũ nhất để bám sát hình ảnh
 	if (audioQueue.length > 3) {
 		audioQueue.shift();
 	}
@@ -107,7 +127,12 @@ async function playNext() {
 
 	const url = URL.createObjectURL(blob);
 	currentAudio = new Audio(url);
-	console.log("🔊 [Đang đọc]:", item.text);
+
+	let dynamicRate = item.speed;
+	if (audioQueue.length >= 2) {
+		dynamicRate = Math.min(1.2, dynamicRate * 1.1);
+	}
+	currentAudio.playbackRate = Number(dynamicRate.toFixed(2));
 
 	currentAudio.onended = () => {
 		URL.revokeObjectURL(url);
@@ -127,78 +152,47 @@ async function playNext() {
 	});
 }
 
-// 3. Vòng lặp đồng bộ thời gian thực với thẻ <video> (Kiểm tra mỗi 150ms)
-let lastVideoTime = 0;
 setInterval(() => {
+	if (location.href !== currentVideoUrl) {
+		currentVideoUrl = location.href;
+		fullResetArrays();
+		return;
+	}
+
 	if (!isEnabled || subtitleCues.length === 0) return;
 	const video = document.querySelector("video");
 	if (!video || video.paused) return;
 
 	const now = video.currentTime;
 
-	// Nếu người dùng tua video (seek), tự động cập nhật lại vị trí câu phụ đề
 	if (Math.abs(now - lastVideoTime) > 2.5) {
-		resetAudioState();
+		audioQueue = [];
+		isPlaying = false;
+		if (currentAudio) {
+			currentAudio.pause();
+			currentAudio = null;
+		}
 		currentCueIndex = subtitleCues.findIndex((c) => c.start >= now);
 		if (currentCueIndex === -1) currentCueIndex = subtitleCues.length;
 	}
 	lastVideoTime = now;
 
-	// TẢI TRƯỚC (Pre-load): Yêu cầu Python tạo âm thanh trước 3.5 giây so với lúc phụ đề xuất hiện
 	for (let i = currentCueIndex; i < subtitleCues.length; i++) {
-		if (subtitleCues[i].start <= now + 3.5) {
-			fetchAudioBlob(subtitleCues[i].text);
+		const cue = subtitleCues[i];
+		if (cue.start <= now + 4.0) {
+			const optSpeed = calculateSmoothSpeed(cue.text, cue.duration);
+			fetchAudioBlob(cue.text, optSpeed);
 		} else {
 			break;
 		}
 	}
 
-	// PHÁT ÂM THANH: Khi thời gian video chạm mốc phụ đề -> Đọc ngay lập tức
-	while (currentCueIndex < subtitleCues.length && subtitleCues[currentCueIndex].start <= now + 0.25) {
+	while (currentCueIndex < subtitleCues.length && subtitleCues[currentCueIndex].start <= now + 0.3) {
 		const cue = subtitleCues[currentCueIndex];
 		currentCueIndex++;
-		// Chỉ đọc nếu câu đó chưa bị trôi qua quá 3 giây
 		if (now - cue.start < 3.0) {
-			enqueueToPlay(cue.text);
+			const optSpeed = calculateSmoothSpeed(cue.text, cue.duration);
+			enqueueToPlay(cue.text, optSpeed, cue.start);
 		}
 	}
-}, 150);
-
-// 4. Cơ chế Dự phòng (Fallback DOM): Chỉ chạy nếu người dùng chưa chuyển ngôn ngữ để kích hoạt API
-let seenWords = [];
-setInterval(() => {
-	// Nếu đã bắt được danh sách phụ đề chuẩn qua API thì tắt hoàn toàn việc quét DOM
-	if (!isEnabled || subtitleCues.length > 0) return;
-
-	const segments = document.querySelectorAll(".ytp-caption-segment");
-	if (segments.length === 0) return;
-
-	const screenText = Array.from(segments)
-		.map((s) => s.textContent)
-		.join(" ")
-		.replace(/\s+/g, " ")
-		.trim();
-
-	if (!screenText) return;
-	const currentWords = screenText.split(" ");
-
-	// Tìm độ lệch từ vựng mới xuất hiện trên màn hình
-	let overlapCount = 0;
-	const maxCheck = Math.min(seenWords.length, currentWords.length);
-	for (let len = maxCheck; len > 0; len--) {
-		const suffix = seenWords.slice(-len).join(" ");
-		const prefix = currentWords.slice(0, len).join(" ");
-		if (suffix === prefix) {
-			overlapCount = len;
-			break;
-		}
-	}
-
-	const newWords = currentWords.slice(overlapCount);
-	if (newWords.length >= 4) {
-		const phrase = newWords.join(" ");
-		seenWords = seenWords.concat(newWords).slice(-50);
-		console.log("📥 [Fallback DOM]:", phrase);
-		enqueueToPlay(phrase);
-	}
-}, 500);
+}, 120);

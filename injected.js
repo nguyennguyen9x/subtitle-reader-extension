@@ -1,5 +1,4 @@
 (function () {
-	// Can thiệp vào XMLHttpRequest và Fetch của YouTube để lấy file phụ đề gốc
 	const originalOpen = XMLHttpRequest.prototype.open;
 	XMLHttpRequest.prototype.open = function (method, url) {
 		if (typeof url === "string" && url.includes("/api/timedtext")) {
@@ -43,29 +42,38 @@
 			if (text) {
 				rawSegments.push({
 					start: ev.tStartMs / 1000,
+					dur: (ev.dDurationMs || 2500) / 1000,
 					text: text,
 				});
 			}
 		}
 
-		// Gom các mảnh phụ đề nhỏ thành câu có nghĩa để đọc tự nhiên và không sót chữ
 		const mergedCues = [];
 		let currentCue = null;
 
 		for (const seg of rawSegments) {
 			if (!currentCue) {
-				currentCue = { start: seg.start, text: seg.text };
+				currentCue = { start: seg.start, end: seg.start + seg.dur, text: seg.text };
 			} else {
 				currentCue.text += " " + seg.text;
+				currentCue.end = Math.max(currentCue.end, seg.start + seg.dur);
 			}
 
-			// Ngắt câu khi gặp dấu chấm câu hoặc khi câu đã đủ độ dài (> 65 ký tự)
 			if (/[.!?]$/.test(seg.text) || currentCue.text.length > 65) {
 				mergedCues.push(currentCue);
 				currentCue = null;
 			}
 		}
 		if (currentCue) mergedCues.push(currentCue);
+
+		// Chuẩn hóa thời lượng khả dụng (duration) cho từng câu dựa trên thời điểm câu tiếp theo xuất hiện
+		for (let i = 0; i < mergedCues.length; i++) {
+			if (i < mergedCues.length - 1) {
+				mergedCues[i].duration = Math.max(0.8, mergedCues[i + 1].start - mergedCues[i].start);
+			} else {
+				mergedCues[i].duration = Math.max(1.5, mergedCues[i].end - mergedCues[i].start);
+			}
+		}
 
 		if (mergedCues.length > 0) {
 			window.postMessage({ type: "SHERPA_SUBTITLES_LOADED", cues: mergedCues }, "*");
