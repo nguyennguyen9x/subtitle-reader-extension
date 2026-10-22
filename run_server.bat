@@ -6,7 +6,16 @@ setlocal
 cd /d "%~dp0"
 
 set VENV_DIR=.venv
-set STAMP_FILE=%VENV_DIR%\.deps_installed
+rem Stamp theo ma bam cua requirements.txt: doi thu vien thi tu cai lai tren .venv cu.
+set REQ_HASH=
+for /f "skip=1 tokens=*" %%H in ('certutil -hashfile requirements.txt SHA1') do if not defined REQ_HASH set REQ_HASH=%%H
+if not defined REQ_HASH (
+    echo [LOI] Khong tinh duoc ma bam cua requirements.txt.
+    pause
+    exit /b 1
+)
+set REQ_HASH=%REQ_HASH: =%
+set STAMP_FILE=%VENV_DIR%\.deps_%REQ_HASH%
 
 where py >nul 2>nul
 if errorlevel 1 (

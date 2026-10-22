@@ -19,6 +19,9 @@
                 "*://*.youtube.com/*"
             ],
             "js": [
+                "smoothing.js",
+                "scheduler.js",
+                "debuglog.js",
                 "content.js"
             ],
             "run_at": "document_start"
