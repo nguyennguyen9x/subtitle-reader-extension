@@ -97,3 +97,67 @@ test("smoothCues: mỗi cue kết quả đều có ssml bọc trong <speak>", ()
 	const [c] = S.smoothCues([cue(0, 2, "Xin chào, các bạn.")]);
 	assert.ok(c.ssml.startsWith("<speak>") && c.ssml.endsWith("</speak>"));
 });
+
+test("Tốc độ: estimateCueDuration ước tính thời gian đọc dựa trên từ, ký tự và dấu nghỉ", () => {
+	const durNoBreak = S.estimateCueDuration({ text: "Một hai ba" });
+	assert.ok(durNoBreak > 0.5 && durNoBreak < 1.5);
+
+	// Dấu phẩy ở giữa thêm 200ms, dấu chấm ở cuối không thêm break
+	const durWithBreak = S.estimateCueDuration({ text: "Một hai ba, bốn năm sáu." });
+	const durWithoutBreak = S.estimateCueDuration({ text: "Một hai ba bốn năm sáu" });
+	assert.ok(durWithBreak > durWithoutBreak);
+	assert.ok(Math.abs((durWithBreak - durWithoutBreak) - 0.2) < 0.05);
+});
+
+test("Tốc độ: calculateCueSpeed tăng tốc khi người nói trong video gốc nói nhanh", () => {
+	// 12 từ trong 1.5s -> người nói nói rất nhanh
+	const fastCue = { start: 10, end: 11.5, duration: 1.5, text: "Chúng tôi đang tiến hành kiểm tra toàn bộ hệ thống ngay bây giờ." };
+	const speed = S.calculateCueSpeed(fastCue);
+	assert.ok(speed > 1.2, `Tốc độ phải tăng đáng kể, thực tế: ${speed}`);
+	assert.ok(speed <= S.CONFIG.speed.maxSpeed);
+});
+
+test("Tốc độ: calculateCueSpeed thong thả khi người nói trong video nói chậm", () => {
+	// 3 từ trong 4.0s -> người nói nói rất chậm
+	const slowCue = { start: 10, end: 14.0, duration: 4.0, text: "Vâng đúng rồi" };
+	const speed = S.calculateCueSpeed(slowCue);
+	assert.ok(speed <= 1.0, `Tốc độ phải chậm lại hoặc bằng cơ sở, thực tế: ${speed}`);
+	assert.ok(speed >= S.CONFIG.speed.minSpeed);
+});
+
+test("Tốc độ: tận dụng khoảng trống an toàn trước câu kế tiếp nếu có chỗ nghỉ", () => {
+	// Câu 8 từ mất ~2.1s, thời lượng nói gốc 1.5s, nhưng câu sau cách 3.0s (có khoảng nghỉ 1.5s)
+	const cue1 = { start: 0, end: 1.5, duration: 3.0, text: "Chúng ta sẽ cùng tìm hiểu vấn đề này" };
+	const nextCue = { start: 3.0, end: 4.5, text: "Ngay bây giờ" };
+	const speedWithGap = S.calculateCueSpeed(cue1, { nextCue });
+	const speedWithoutGap = S.calculateCueSpeed(cue1, { nextCue: { start: 1.6, end: 3.0, text: "Ngay bây giờ" } });
+	assert.ok(speedWithGap < speedWithoutGap, `Có khoảng trống nên đọc tự nhiên hơn (${speedWithGap} < ${speedWithoutGap})`);
+});
+
+test("Tốc độ: calculateCueSpeed nhân đúng với videoRate và không vượt ngưỡng 2.0 của Edge-TTS", () => {
+	const cue1 = { start: 0, end: 2.0, duration: 2.0, text: "Một hai ba bốn năm sáu bảy tám" };
+	const speed1x = S.calculateCueSpeed(cue1, { videoRate: 1.0 });
+	const speed1_5x = S.calculateCueSpeed(cue1, { videoRate: 1.5 });
+	assert.ok(Math.abs(speed1_5x - Number((speed1x * 1.5).toFixed(2))) <= 0.02);
+
+	// Tốc độ cao không được vượt 2.0 (giới hạn cứng của Edge-TTS)
+	const extremeSpeed = S.calculateCueSpeed(
+		{ start: 0, end: 1.0, duration: 1.0, text: "Một câu nói cực kỳ dài và nhanh để ép tốc độ lên mức tối đa" },
+		{ videoRate: 2.0 }
+	);
+	assert.equal(extremeSpeed, 2.0);
+});
+
+test("Tốc độ: smoothCues tự động gán origDuration, estimatedDuration và speedFactor", () => {
+	const cues = [
+		cue(0, 2, "Xin chào các bạn đã quay trở lại"),
+		cue(2.5, 4.5, "Hôm nay chúng ta sẽ tiếp tục")
+	];
+	const out = S.smoothCues(cues);
+	assert.equal(out.length, 2);
+	for (const c of out) {
+		assert.ok(typeof c.origDuration === "number" && c.origDuration > 0);
+		assert.ok(typeof c.estimatedDuration === "number" && c.estimatedDuration > 0);
+		assert.ok(typeof c.speedFactor === "number" && c.speedFactor >= 0.5 && c.speedFactor <= 2.0);
+	}
+});

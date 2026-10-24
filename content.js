@@ -249,6 +249,24 @@ function getFixedSpeed(lang) {
 	return Number((fixedSpeed * videoRate).toFixed(2));
 }
 
+// Tính tốc độ đọc linh hoạt cho từng câu dựa trên phân tích độ dài câu và thời lượng nói gốc của video.
+function getCueSpeed(cue, nextCue) {
+	if (!cue) return 1.0;
+	const video = document.querySelector("video");
+	const videoRate = video ? video.playbackRate : 1.0;
+	const isEnglish = currentSubtitleLang.includes("en") || currentSubtitleLang.includes("auto");
+	const baseSpeed = isEnglish ? 1.0 : 0.95;
+
+	if (globalThis.SherpaSmoothing && typeof globalThis.SherpaSmoothing.calculateCueSpeed === "function") {
+		return globalThis.SherpaSmoothing.calculateCueSpeed(cue, {
+			nextCue,
+			videoRate,
+			baseSpeed,
+		});
+	}
+	return Number((baseSpeed * videoRate).toFixed(2));
+}
+
 function synthesizeCue(cue, speed) {
 	return fetch(SYNTHESIZE_URL, {
 		method: "POST",
@@ -399,7 +417,7 @@ setInterval(() => {
 		cues: subtitleCues,
 		cursor: currentCueIndex,
 		now: video.currentTime,
-		speed: getFixedSpeed(currentSubtitleLang),
+		getSpeed: (cue, index) => getCueSpeed(cue, subtitleCues[index + 1]),
 	});
 
 	if (video.paused) {
@@ -427,9 +445,16 @@ setInterval(() => {
 		const cue = subtitleCues[index];
 		currentCueIndex++;
 		if (now - cue.start < MAX_LATE_START_SEC) {
-			const fixedSpeed = getFixedSpeed(currentSubtitleLang);
-			debug.log("enqueue", { ...cueRef(cue, index), now: round2(now), late: round2(now - cue.start), speed: fixedSpeed });
-			enqueueToPlay(cue, fixedSpeed, index);
+			const cueSpeed = getCueSpeed(cue, subtitleCues[index + 1]);
+			debug.log("enqueue", {
+				...cueRef(cue, index),
+				now: round2(now),
+				late: round2(now - cue.start),
+				speed: cueSpeed,
+				origDur: round2(cue.origDuration !== undefined ? cue.origDuration : (cue.end - cue.start)),
+				estDur: round2(cue.estimatedDuration),
+			});
+			enqueueToPlay(cue, cueSpeed, index);
 		} else {
 			debug.log("skip-late", { ...cueRef(cue, index), now: round2(now) });
 		}

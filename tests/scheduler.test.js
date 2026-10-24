@@ -135,3 +135,43 @@ test("reset: xóa hàng đợi", async () => {
 	await fake.resolveNext();
 	assert.equal(fake.calls.length, 1, "không còn job nào tiếp tục sau reset");
 });
+
+test("Tốc độ: update hỗ trợ getSpeed để synth từng cue với tốc độ phân tích riêng", async () => {
+	const callsWithSpeed = [];
+	const pending = [];
+	const fakeSynth = (cue, speed) => {
+		callsWithSpeed.push({ ssml: cue.ssml, speed });
+		return new Promise((resolve) => pending.push(() => resolve(`blob:${cue.ssml}|${speed}`)));
+	};
+
+	const sch = createScheduler({ synthesize: fakeSynth });
+	const cues = [
+		{ start: 0, ssml: "<speak>c0</speak>", speed: 1.2 },
+		{ start: 1, ssml: "<speak>c1</speak>", speed: 0.95 },
+	];
+
+	// Sử dụng getSpeed callback
+	sch.update({
+		cues,
+		cursor: 0,
+		now: 0,
+		getSpeed: (cue) => cue.speed,
+	});
+
+	assert.equal(callsWithSpeed.length, 1);
+	assert.equal(callsWithSpeed[0].speed, 1.2);
+
+	pending.shift()();
+	await new Promise((r) => setImmediate(r));
+
+	assert.equal(callsWithSpeed.length, 2);
+	assert.equal(callsWithSpeed[1].speed, 0.95);
+
+	pending.shift()();
+	await new Promise((r) => setImmediate(r));
+
+	// request đúng tốc độ của c0 lấy ngay từ cache, không synth lại
+	const blob = await sch.request(cues[0], 1.2);
+	assert.equal(blob, "blob:<speak>c0</speak>|1.2");
+	assert.equal(callsWithSpeed.length, 2, "không gọi thêm synth khi đã cache đúng tốc độ");
+});

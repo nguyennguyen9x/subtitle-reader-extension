@@ -143,6 +143,7 @@
 		if (currentCue) mergedCues.push(currentCue);
 
 		for (let i = 0; i < mergedCues.length; i++) {
+			mergedCues[i].origDuration = Math.max(0.3, mergedCues[i].end - mergedCues[i].start);
 			if (i < mergedCues.length - 1) {
 				mergedCues[i].duration = Math.max(0.8, mergedCues[i + 1].start - mergedCues[i].start);
 			} else {

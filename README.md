@@ -70,13 +70,25 @@ Các sự kiện chính: `load` (nạp phụ đề), `reset` (kèm `reason`), `s
 `play-rejected`, `blocked-retry`, `blocked-drop`, `tick-replay-ended`. Trường `stale: true` nghĩa là sự kiện đến từ
 audio đã bị thay thế sau khi tua/reset.
 
+## Phân tích tốc độ đọc (khớp tốc độ nói video gốc)
+
+Mỗi câu phụ đề YouTube có mốc thời gian bắt đầu (`start`), kết thúc (`end`) và thời lượng người nói phát âm trong video gốc (`origDuration`), cùng khoảng thời gian đến câu tiếp theo (`slotDuration`).
+
+Extension tự động phân tích:
+1. **Ước lượng thời lượng đọc chuẩn (`estimateCueDuration`):** Tính toán số từ, số ký tự và các khoảng nghỉ theo dấu câu (`breakMs`) cần thiết để phát âm câu phụ đề ở tốc độ bình thường (1.0x).
+2. **Khớp với tốc độ video gốc (`calculateCueSpeed`):**
+   - Khi người nói nói nhanh: Tự động tăng tốc độ đọc (tối đa `1.75x`) để câu đọc kết thúc kịp thời, không đè lên câu tiếp theo và không bị trễ/bỏ lỡ câu.
+   - Khi người nói nói chậm/ngắt nghỉ: Cho phép câu đọc thong thả hơn (tối thiểu `0.85x`), giữ lại khoảng lặng tự nhiên giữa các câu thay vì đọc kéo dài quá mức.
+   - Khi bản dịch dài hơn nhưng có khoảng trống trước câu sau: Tận dụng khoảng trống an toàn để đọc tự nhiên, tránh bị vội.
+   - Tự động điều chỉnh theo tốc độ phát của video (`video.playbackRate`), ví dụ khi người dùng xem 1.25x hay 1.5x.
+
 ## Cấu trúc
 
 | File | Vai trò |
 |---|---|
-| `smoothing.js` | Chuẩn hóa văn bản, gộp/tách cue, sinh SSML (ngắt nghỉ theo dấu câu, đổi tốc độ theo cụm). |
-| `scheduler.js` | Tổng hợp trước vài cue phía trước vị trí đang đọc, ưu tiên theo khoảng cách, bỏ hàng đợi cũ khi tua. |
-| `content.js`, `injected.js` | Bắt phụ đề YouTube, điều khiển phát audio. |
+| `smoothing.js` | Chuẩn hóa văn bản, gộp/tách cue, phân tích tốc độ đọc khớp với video gốc, sinh SSML (ngắt nghỉ theo dấu câu, đổi tốc độ theo cụm). |
+| `scheduler.js` | Tổng hợp trước vài cue phía trước vị trí đang đọc với tốc độ phân tích riêng cho từng cue, ưu tiên theo khoảng cách, bỏ hàng đợi cũ khi tua. |
+| `content.js`, `injected.js` | Bắt phụ đề YouTube, tính tốc độ theo từng câu và playbackRate, điều khiển phát audio. |
 | `debuglog.js` | Log debug bật/tắt bằng `localStorage.sherpaDebug`, không ghi nội dung câu. |
 | `ssml.py` | Parse SSML và ghép các đoạn audio có chèn khoảng lặng. |
 | `edge_engine.py` | Gọi Edge-TTS (song song, retry), giải mã MP3, cắt im lặng thừa. |

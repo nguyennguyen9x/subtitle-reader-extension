@@ -80,16 +80,26 @@
 		}
 
 		// Gọi định kỳ: dựng lại hàng đợi theo vị trí hiện tại (hàng đợi cũ, ví dụ trước khi tua, bị bỏ).
-		function update({ cues, cursor, now, speed }) {
+		function update({ cues, cursor, now, speed, getSpeed }) {
+			const resolveSpeed = (cue, i) => {
+				if (typeof getSpeed === "function") return getSpeed(cue, i);
+				if (typeof speed === "function") return speed(cue, i);
+				if (cue && cue.speed !== undefined) return cue.speed;
+				return speed;
+			};
 			const isHandled = (i) => {
-				const key = keyOf(cues[i], speed);
+				const s = resolveSpeed(cues[i], i);
+				const key = keyOf(cues[i], s);
 				return cache.has(key) || inflight.has(key) || recentlyFailed(key);
 			};
-			queue = pickPending({ cues, cursor, now, isHandled }).map((i) => ({
-				cue: cues[i],
-				speed,
-				key: keyOf(cues[i], speed),
-			}));
+			queue = pickPending({ cues, cursor, now, isHandled }).map((i) => {
+				const s = resolveSpeed(cues[i], i);
+				return {
+					cue: cues[i],
+					speed: s,
+					key: keyOf(cues[i], s),
+				};
+			});
 			pump();
 		}
 
